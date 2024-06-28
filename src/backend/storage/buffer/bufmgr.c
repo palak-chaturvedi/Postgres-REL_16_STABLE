@@ -5592,3 +5592,66 @@ TestForOldSnapshot_impl(Snapshot snapshot, Relation relation)
 				(errcode(ERRCODE_SNAPSHOT_TOO_OLD),
 				 errmsg("snapshot too old")));
 }
+
+
+/*
+ * Try to invalidate a shared buffer.
+ *
+ * This function is intended for testing/development use only!
+ *
+ * To succeed, the buffer should not be pinned on entry, so if the caller had a
+ * particular block in mind, it might already have been replaced by some other
+ * block by the time this function runs.  It's also unpinned on return, so the
+ * buffer might be occupied again by the time control is returned, potentially
+ * even by the same block.  This inherent raciness without other interlocking
+ * makes the function unsuitable for non-testing usage.
+ *
+ * Returns true if the buffer was valid and it has now been made invalid.
+ * Returns false if the wasn't valid, or it couldn't be evicted due to a pin,
+ * or if the buffer becomes dirty again while we're trying to write it out.
+ */
+bool
+InvalidateUnpinnedBuffer(Buffer buf)
+{
+	BufferDesc *desc;
+	uint32		buf_state;
+	bool		result;
+
+	ResourceOwnerEnlargeBuffers(CurrentResourceOwner);
+	ReservePrivateRefCountEntry();
+
+	Assert(!BufferIsLocal(buf));
+	desc = GetBufferDescriptor(buf - 1);
+
+	/* Lock the header and check if it's valid. */
+	buf_state = LockBufHdr(desc);
+	if ((buf_state & BM_VALID) == 0)
+	{
+		UnlockBufHdr(desc, buf_state);
+		return false;
+	}
+
+	/* Check that it's not pinned already. */
+	if (BUF_STATE_GET_REFCOUNT(buf_state) > 0)
+	{
+		UnlockBufHdr(desc, buf_state);
+		return false;
+	}
+
+	PinBuffer_Locked(desc);		/* releases spinlock */
+
+	/* If it was dirty, try to clean it once. */
+	if (buf_state & BM_DIRTY)
+	{
+		LWLockAcquire(BufferDescriptorGetContentLock(desc), LW_SHARED);
+		FlushBuffer(desc, NULL, IOOBJECT_RELATION, IOCONTEXT_NORMAL);
+		LWLockRelease(BufferDescriptorGetContentLock(desc));
+	}
+
+	/* This will return false if it becomes dirty or someone else pins it. */
+	result = InvalidateVictimBuffer(desc);
+
+	// UnpinBuffer(desc);
+
+	return result;
+}

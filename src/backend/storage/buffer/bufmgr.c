@@ -5651,7 +5651,7 @@ InvalidateUnpinnedBuffer(Buffer buf)
 	/* This will return false if it becomes dirty or someone else pins it. */
 	result = InvalidateVictimBuffer(desc);
 
-	// UnpinBuffer(desc);
+	UnpinBuffer(desc);
 
 	return result;
 }
